@@ -1,0 +1,15 @@
+# Compilation
+build/
+bin/
+*.o
+
+# Output Data
+*.dat
+*.png
+HardSphere/
+scripts/log.txt
+debug_gr/
+
+# OS / Editors
+.DS_Store
+.vscode/
