@@ -80,7 +80,9 @@ int main(int argc, char *argv[]) {
   std::string initFile = "";
   double lambda = 1.5;
   double qVal = 7.14; // Default Wave Vector magnitude
-  double dt = 0.001;  // Default Time Step
+
+  double dt = 0.001;        // Default Time Step
+  bool useCellLists = true; // Default ON
 
   // Process CLI arguments (Simple "Key=Value" or Flags)
   // Usage: ./brownian_dynamics 3D PHI=0.4 N=500 T=1.5
@@ -189,11 +191,13 @@ int main(int argc, char *argv[]) {
 
   if (dim == 2) {
     Simulation<2> sim(nPart, phi, temp, cutoff, dt, steps, pot, suffix,
-                      outputDir, qs, equilSteps, saveFreq, initFile);
+                      outputDir, qs, equilSteps, saveFreq, initFile,
+                      useCellLists);
     sim.run();
   } else if (dim == 3) {
     Simulation<3> sim(nPart, phi, temp, cutoff, dt, steps, pot, suffix,
-                      outputDir, qs, equilSteps, saveFreq, initFile);
+                      outputDir, qs, equilSteps, saveFreq, initFile,
+                      useCellLists);
     sim.run();
   } else {
     std::cerr << "Error: Only 2D or 3D supported." << std::endl;

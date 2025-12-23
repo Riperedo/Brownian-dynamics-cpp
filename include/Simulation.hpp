@@ -72,7 +72,9 @@ private:
   std::vector<int> cellHead;    // Head particle index for each cell
   std::array<int, Dim> gridDim; // Cells in each dimension
   Vector<Dim> cellSize;
+
   int numCellsTotal;
+  bool useCellList; // Optimization Flag
 
   int getCellIndex(const Vector<Dim> &pos) {
     int index = 0;
@@ -129,11 +131,12 @@ public:
              long long steps, std::shared_ptr<InteractionPotential> pot,
              std::string suffix = "", std::string outDir = "scripts",
              std::vector<double> qs = {7.14}, long long eqSteps = 0,
-             int saveFreq = 1000, std::string initFile = "")
+             int saveFreq = 1000, std::string initFile = "",
+             bool useCells = true)
       : numParticles(nPart), density(0), temperature(temp), cutOff(rc),
         dt(timeStep), boxSize(0), potential(pot), step(0), totalSteps(steps),
         equilSteps(eqSteps), saveInterval(saveFreq), outputDir(outDir),
-        outputSuffix(suffix), waveVectors(qs) {
+        outputSuffix(suffix), waveVectors(qs), useCellList(useCells) {
 
     // Initialize RNG
     gsl_rng_env_setup();
@@ -186,101 +189,112 @@ public:
   ~Simulation() { gsl_rng_free(rng); }
 
   void calculateForces() {
-    // Update Cell Lists
-    updateCellList();
-
     // Reset forces
     for (auto &f : forces)
       for (size_t k = 0; k < Dim; ++k)
         f[k] = 0.0;
 
-// Parallelize over particles
-// We use dynamic schedule
+    if (useCellList) {
+      // --- Option 1: O(N) Cell Lists ---
+      updateCellList();
+
 #pragma omp parallel for schedule(dynamic)
-    for (int i = 0; i < numParticles; ++i) {
-      // Identify my cell
-      int myCell = getCellIndex(positions[i]);
-      Vector<Dim> r_i = positions[i];
+      for (int i = 0; i < numParticles; ++i) {
+        int myCell = getCellIndex(positions[i]);
+        Vector<Dim> r_i = positions[i];
 
-      // Recover explicit grid indices kx, ky, kz from myCell
-      // This is needed to iterate neighbors correctly handling PBC
-      // (Alternatively, pre-compute neighbor list for each cell, but doing it
-      // on fly is cheap enough)
-      int idx[3] = {0, 0, 0};
-      int temp = myCell;
-      idx[0] = temp % gridDim[0];
-      temp /= gridDim[0];
-      if (Dim >= 2) {
-        idx[1] = temp % gridDim[1];
-        temp /= gridDim[1];
-      }
-      if (Dim >= 3) {
-        idx[2] = temp % gridDim[2];
-      }
+        // Reconstruct grid index
+        int idx[3] = {0, 0, 0};
+        int temp = myCell;
+        idx[0] = temp % gridDim[0];
+        temp /= gridDim[0];
+        if (Dim >= 2) {
+          idx[1] = temp % gridDim[1];
+          temp /= gridDim[1];
+        }
+        if (Dim >= 3) {
+          idx[2] = temp % gridDim[2];
+        }
 
-      // Loop neighbors (3x3x3 block around my cell)
-      // D-dimensional loop? Hard with template.
-      // We can limit offsets to {-1, 0, 1} per dimension.
+        int kx_start = -1, kx_end = 1;
+        int ky_start = (Dim >= 2) ? -1 : 0;
+        int ky_end = (Dim >= 2) ? 1 : 0;
+        int kz_start = (Dim >= 3) ? -1 : 0;
+        int kz_end = (Dim >= 3) ? 1 : 0;
 
-      int kx_start = -1, kx_end = 1;
-      int ky_start = (Dim >= 2) ? -1 : 0;
-      int ky_end = (Dim >= 2) ? 1 : 0;
-      int kz_start = (Dim >= 3) ? -1 : 0;
-      int kz_end = (Dim >= 3) ? 1 : 0;
+        for (int dz = kz_start; dz <= kz_end; ++dz) {
+          for (int dy = ky_start; dy <= ky_end; ++dy) {
+            for (int dx = kx_start; dx <= kx_end; ++dx) {
+              int nx = (idx[0] + dx + gridDim[0]) % gridDim[0];
+              int ny = (Dim >= 2) ? (idx[1] + dy + gridDim[1]) % gridDim[1] : 0;
+              int nz = (Dim >= 3) ? (idx[2] + dz + gridDim[2]) % gridDim[2] : 0;
 
-      for (int dz = kz_start; dz <= kz_end; ++dz) {
-        for (int dy = ky_start; dy <= ky_end; ++dy) {
-          for (int dx = kx_start; dx <= kx_end; ++dx) {
+              int neighborCell = nx;
+              if (Dim >= 2)
+                neighborCell += ny * gridDim[0];
+              if (Dim >= 3)
+                neighborCell += nz * gridDim[0] * gridDim[1];
 
-            // Apply PBC to neighbor cell index
-            int nx = (idx[0] + dx + gridDim[0]) % gridDim[0];
-            int ny = (Dim >= 2) ? (idx[1] + dy + gridDim[1]) % gridDim[1] : 0;
-            int nz = (Dim >= 3) ? (idx[2] + dz + gridDim[2]) % gridDim[2] : 0;
+              int j = cellHead[neighborCell];
+              while (j != -1) {
+                if (j > i) {
+                  Vector<Dim> dr = r_i - positions[j];
+                  for (size_t k = 0; k < Dim; ++k)
+                    dr[k] -= std::round(dr[k] / boxSize) * boxSize;
 
-            // Reconstruct linear neighbor cell index
-            int neighborCell = nx;
-            if (Dim >= 2)
-              neighborCell += ny * gridDim[0];
-            if (Dim >= 3)
-              neighborCell += nz * gridDim[0] * gridDim[1];
+                  double r2 = dr.norm2();
+                  if (r2 < cutOff * cutOff) {
+                    double r = std::sqrt(r2);
+                    double fMag = potential->calculateForceMagnitude(r);
+                    Vector<Dim> fVec = fMag * (1.0 / r) * dr;
 
-            // Iterate particles in neighbor cell
-            int j = cellHead[neighborCell];
-            while (j != -1) {
-              // Newton's 3rd Law: only if j > i
-              // This prevents double counting and self-interaction
-              if (j > i) {
-                Vector<Dim> dr = r_i - positions[j];
-
-                // Minimum Image Convention
-                for (size_t k = 0; k < Dim; ++k) {
-                  dr[k] -= std::round(dr[k] / boxSize) * boxSize;
-                }
-
-                double r2 = dr.norm2();
-                if (r2 < cutOff * cutOff) {
-                  double r = std::sqrt(r2);
-                  double fMag = potential->calculateForceMagnitude(r);
-                  Vector<Dim> fVec = fMag * (1.0 / r) * dr;
-
-                  // Atomic Updates
-                  for (size_t k = 0; k < Dim; ++k) {
+                    for (size_t k = 0; k < Dim; ++k) {
 #pragma omp atomic
-                    forces[i][k] += fVec[k];
+                      forces[i][k] += fVec[k];
 #pragma omp atomic
-                    forces[j][k] -= fVec[k];
-                  }
-
+                      forces[j][k] -= fVec[k];
+                    }
 #pragma omp critical
-                  rdf->sample(r);
+                    rdf->sample(r);
+                  }
                 }
+                j = cellList[j];
               }
-              j = cellList[j]; // Next particle in cell
             }
           }
         }
       }
+    } else {
+// --- Option 2: O(N^2) All Pairs (Legacy / Long Range) ---
+#pragma omp parallel for schedule(dynamic)
+      for (int i = 0; i < numParticles - 1; ++i) {
+        for (int j = i + 1; j < numParticles; ++j) {
+          Vector<Dim> dr = positions[i] - positions[j];
+
+          for (size_t k = 0; k < Dim; ++k) {
+            dr[k] -= std::round(dr[k] / boxSize) * boxSize;
+          }
+
+          double r2 = dr.norm2();
+          if (r2 < cutOff * cutOff) {
+            double r = std::sqrt(r2);
+            double fMag = potential->calculateForceMagnitude(r);
+            Vector<Dim> fVec = fMag * (1.0 / r) * dr;
+
+            for (size_t k = 0; k < Dim; ++k) {
+#pragma omp atomic
+              forces[i][k] += fVec[k];
+#pragma omp atomic
+              forces[j][k] -= fVec[k];
+            }
+
+#pragma omp critical
+            rdf->sample(r);
+          }
+        }
+      }
     }
+
     rdf->frameComputed();
   }
 
