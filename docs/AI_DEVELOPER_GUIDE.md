@@ -3,6 +3,8 @@
 ## Purpose
 This document is designed to provide context for AI assistants (like Gemini) or new developers. It bridges the gap between the Physics of Brownian Motion and this specific C++ implementation. Use this context to request features or "courses" on the topic.
 
+> **Original Codebase**: This project is ported from the Fortran version: https://github.com/Alpixels/Brownian-Dynamics
+
 ---
 
 ## 1. Physics Crash Course
@@ -21,7 +23,7 @@ $$ r(t + \Delta t) = r(t) + \frac{D}{k_B T} F(t) \Delta t + \xi $$
 Where $\xi$ is a random Gaussian displacement with variance $\langle \xi^2 \rangle = 2 D \Delta t$.
 
 **In this Code (`Simulation.hpp`):**
-*   `calculateForces()` computes $F(t)$.
+*   `calculateForces()` computes $F(t)$ using **Cell Lists** ($O(N)$) or all-pairs ($O(N^2)$).
 *   `integrate()` applies the update rule.
 *   `gsl_ran_gaussian` generates $\xi$.
 

@@ -30,9 +30,6 @@ make
 ```
 This generates the executable `bin/brownian_dynamics`.
 
-## Usage
-Run the simulation specifying dimensions or potential types as arguments. The default configuration is read from `inputs/BD.inp`.
-
 ### Default Run (2D, Lennard-Jones)
 Run the simulation providing parameters via command line (order doesn't matter):
 ```bash
@@ -49,15 +46,17 @@ Run the simulation providing parameters via command line (order doesn't matter):
 *   `CUT=...`: Cutoff Radius (Default: 2.5)
 *   `STEPS=...`: Simulation Steps (Default: 1000000)
 *   `OUT_DIR=...`: Output Directory (Default: "scripts")
+*   `INIT_FILE=...`: Path to initial config file (Format: `Type X Y Z Label`)
+*   `CELL_LIST=...`: 1 for $O(N)$ (Default), 0 for $O(N^2)$ (Legacy/Long Range)
 
 **Example**:
 ```bash
-./bin/brownian_dynamics 3D HARD_SPHERE N=500 PHI=0.45 STEPS=100000 OUT_DIR=./results DT=0.00001 SAVE_FREQ=10
+./bin/brownian_dynamics 3D HARD_SPHERE N=500 PHI=0.45 CELL_LIST=1 OUT_DIR=./results
 ```
 
-**Potentials**: `LENNARD_JONES`, `SQUARE_WELL`, `HERTZIAN`, `HARD_SPHERE`.
-
-*Note: The project no longer depends on `inputs/BD.inp`.*
+## Credits
+This project is a C++ port and modernization of the original Fortran implementation:
+*   [**Brownian-Dynamics (Fortran)**](https://github.com/Alpixels/Brownian-Dynamics) by Alpixels.
 
 ## Visualization
 Install `gnuplot` to visualize results:
