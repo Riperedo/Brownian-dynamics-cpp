@@ -86,10 +86,15 @@ int main(int argc, char *argv[]) {
   // Usage: ./brownian_dynamics 3D PHI=0.4 N=500 T=1.5
   for (int i = 1; i < argc; ++i) {
     std::string arg = argv[i];
+
+    // --- Simulation Dimension ---
     if (arg == "3D")
       dim = 3;
     else if (arg == "2D")
       dim = 2;
+
+    // --- Interaction Potential Type ---
+    // Options: SQUARE_WELL, HERTZIAN, LENNARD_JONES (LJ), HARD_SPHERE (HS)
     else if (arg == "SQUARE_WELL")
       potentialType = "SQUARE_WELL";
     else if (arg == "HERTZIAN")
@@ -98,30 +103,52 @@ int main(int argc, char *argv[]) {
       potentialType = "LENNARD_JONES";
     else if (arg == "HARD_SPHERE" || arg == "HS")
       potentialType = "HARD_SPHERE";
+
+    // --- System Parameters ---
+    // PHI: Volume Fraction (0.0 to 1.0). Controls density.
     else if (arg.find("PHI=") == 0)
       phi = std::stod(arg.substr(4));
+    // N: Number of particles (overriden if INIT_FILE is used)
     else if (arg.find("N=") == 0)
       nPart = std::stoi(arg.substr(2));
+    // T: Temperature (approximated, usually 1.0 in dimensionless units)
     else if (arg.find("T=") == 0)
       temp = std::stod(arg.substr(2));
+
+    // --- Potential Specifics ---
+    // CUT: Cutoff radius for potential truncation
     else if (arg.find("CUT=") == 0)
       cutoff = std::stod(arg.substr(4));
-    else if (arg.find("STEPS=") == 0)
-      steps = std::stoll(arg.substr(6));
-    else if (arg.find("OUT_DIR=") == 0)
-      outputDir = arg.substr(8);
+    // LAMBDA: Secondary length scale (e.g., width of Square Well)
     else if (arg.find("LAMBDA=") == 0)
       lambda = std::stod(arg.substr(7));
-    else if (arg.find("Q=") == 0)
-      qVal = std::stod(arg.substr(2));
+
+    // --- Simulation Control ---
+    // STEPS: Total simulation steps
+    else if (arg.find("STEPS=") == 0)
+      steps = std::stoll(arg.substr(6));
+    // DT: Time step integration size. CRITICAL: Use small DT (1e-4 or 1e-5) for
+    // Hard Spheres.
     else if (arg.find("DT=") == 0)
       dt = std::stod(arg.substr(3));
+    // EQUIL: Number of steps to run for equilibration (results not saved)
     else if (arg.find("EQUIL=") == 0)
       equilSteps = std::stoll(arg.substr(6));
+
+    // --- I/O and Analysis ---
+    // SAVE_FREQ: How often to sample observables (steps)
     else if (arg.find("SAVE_FREQ=") == 0)
       saveFreq = std::stoi(arg.substr(10));
+    // INIT_FILE: Path to initial configuration file (overrides N and Lattice
+    // init)
     else if (arg.find("INIT_FILE=") == 0)
       initFile = arg.substr(10);
+    // OUT_DIR: Directory to save results
+    else if (arg.find("OUT_DIR=") == 0)
+      outputDir = arg.substr(8);
+    // Q: Wave vector magnitude for Intermediate Scattering Function analysis
+    else if (arg.find("Q=") == 0)
+      qVal = std::stod(arg.substr(2));
   }
 
   // Auto-generate suffix

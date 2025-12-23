@@ -67,6 +67,63 @@ private:
   std::string outputSuffix;
   std::vector<double> waveVectors;
 
+  // Cell Lists
+  std::vector<int> cellList;    // Next particle index
+  std::vector<int> cellHead;    // Head particle index for each cell
+  std::array<int, Dim> gridDim; // Cells in each dimension
+  Vector<Dim> cellSize;
+  int numCellsTotal;
+
+  int getCellIndex(const Vector<Dim> &pos) {
+    int index = 0;
+    int stride = 1;
+    for (size_t k = 0; k < Dim; ++k) {
+      // Wrap position to [0, boxSize) for binning
+      double p = pos[k] + boxSize / 2.0;
+      // Handle small numerical boundary errors
+      if (p < 0.0)
+        p += boxSize;
+      if (p >= boxSize)
+        p -= boxSize;
+
+      int idx = static_cast<int>(p / cellSize[k]);
+      if (idx >= gridDim[k])
+        idx = gridDim[k] - 1;
+      if (idx < 0)
+        idx = 0;
+
+      index += idx * stride;
+      stride *= gridDim[k];
+    }
+    return index;
+  }
+
+  void updateCellList() {
+    // 1. Calculate grid dimensions if box changed or first run
+    // Assuming isotropic box for now, but general logic is safer
+    // Ensure at least 3 cells OR 1 cell (if box < cutoff? No, box > cutoff
+    // implied)
+    for (size_t k = 0; k < Dim; ++k) {
+      gridDim[k] = static_cast<int>(boxSize / cutOff);
+      if (gridDim[k] < 1)
+        gridDim[k] = 1;
+      cellSize[k] = boxSize / gridDim[k];
+    }
+
+    numCellsTotal = 1;
+    for (size_t k = 0; k < Dim; ++k)
+      numCellsTotal *= gridDim[k];
+
+    cellHead.assign(numCellsTotal, -1);
+    cellList.resize(numParticles);
+
+    for (int i = 0; i < numParticles; ++i) {
+      int c = getCellIndex(positions[i]);
+      cellList[i] = cellHead[c];
+      cellHead[c] = i;
+    }
+  }
+
 public:
   Simulation(int nPart, double phi, double temp, double rc, double timeStep,
              long long steps, std::shared_ptr<InteractionPotential> pot,
@@ -129,63 +186,97 @@ public:
   ~Simulation() { gsl_rng_free(rng); }
 
   void calculateForces() {
+    // Update Cell Lists
+    updateCellList();
+
     // Reset forces
     for (auto &f : forces)
       for (size_t k = 0; k < Dim; ++k)
         f[k] = 0.0;
 
-// double potentialEnergy = 0.0; // Unused for now
-
-// Pair loop
-// OpenMP Parallelization
-// Use dynamic scheduling to balance load (inner loop shrinks)
+// Parallelize over particles
+// We use dynamic schedule
 #pragma omp parallel for schedule(dynamic)
-    for (int i = 0; i < numParticles - 1; ++i) {
-      for (int j = i + 1; j < numParticles; ++j) {
-        Vector<Dim> dr = positions[i] - positions[j];
+    for (int i = 0; i < numParticles; ++i) {
+      // Identify my cell
+      int myCell = getCellIndex(positions[i]);
+      Vector<Dim> r_i = positions[i];
 
-        // Minimum Image Convention
-        for (size_t k = 0; k < Dim; ++k) {
-          dr[k] -= std::round(dr[k] / boxSize) * boxSize;
-        }
+      // Recover explicit grid indices kx, ky, kz from myCell
+      // This is needed to iterate neighbors correctly handling PBC
+      // (Alternatively, pre-compute neighbor list for each cell, but doing it
+      // on fly is cheap enough)
+      int idx[3] = {0, 0, 0};
+      int temp = myCell;
+      idx[0] = temp % gridDim[0];
+      temp /= gridDim[0];
+      if (Dim >= 2) {
+        idx[1] = temp % gridDim[1];
+        temp /= gridDim[1];
+      }
+      if (Dim >= 3) {
+        idx[2] = temp % gridDim[2];
+      }
 
-        double r2 = dr.norm2();
-        if (r2 < cutOff * cutOff) {
-          double r = std::sqrt(r2);
-          double fMag = potential->calculateForceMagnitude(r);
+      // Loop neighbors (3x3x3 block around my cell)
+      // D-dimensional loop? Hard with template.
+      // We can limit offsets to {-1, 0, 1} per dimension.
 
-          // Force Vector: F = fMag * (dr / r)
-          Vector<Dim> fVec = fMag * (1.0 / r) * dr;
+      int kx_start = -1, kx_end = 1;
+      int ky_start = (Dim >= 2) ? -1 : 0;
+      int ky_end = (Dim >= 2) ? 1 : 0;
+      int kz_start = (Dim >= 3) ? -1 : 0;
+      int kz_end = (Dim >= 3) ? 1 : 0;
 
-          // Update forces[i] - Thread safe (i is unique per thread iteration)
-          // Wait, 'forces[i]' is effectively a reduction variable?
-          // No, 'i' is the outer loop index. ONLY THIS THREAD processes 'i'.
-          // SO forces[i] write is safe?
-          // YES, if we only accumulate fVec onto forces[i].
-          // BUT we also update forces[j]. 'j' can be accessed by multiple
-          // threads (as 'i' in another thread, or 'j' in another). Actually,
-          // 'j' varies. Multiple 'i' threads could pick the same 'j'. So
-          // forces[j] needs ATOMIC. forces[i] needs protection? No, i is unique
-          // to the thread. BUT wait, forces[i] is updated by OTHER threads when
-          // THEY are 'i' and THIS 'i' is their 'j'? Yes. If thread 1 handles
-          // i=1, j=5. It updates f[5]. Thread 5 handles i=5, j=... (j > 5). BUT
-          // thread 2 handles i=2, j=5. It updates f[5]. So 'forces[i]' implies
-          // 'forces[some_j]' elsewhere? No. The loop is "for i". Thread owns
-          // 'i'. But when 'i' is 'j' in another thread's loop? Yes. Since we do
-          // forces[j] -= fVec, any index can be a 'j'. Therefore, ALL force
-          // updates must be atomic to be safe.
+      for (int dz = kz_start; dz <= kz_end; ++dz) {
+        for (int dy = ky_start; dy <= ky_end; ++dy) {
+          for (int dx = kx_start; dx <= kx_end; ++dx) {
 
-          for (size_t k = 0; k < Dim; ++k) {
+            // Apply PBC to neighbor cell index
+            int nx = (idx[0] + dx + gridDim[0]) % gridDim[0];
+            int ny = (Dim >= 2) ? (idx[1] + dy + gridDim[1]) % gridDim[1] : 0;
+            int nz = (Dim >= 3) ? (idx[2] + dz + gridDim[2]) % gridDim[2] : 0;
+
+            // Reconstruct linear neighbor cell index
+            int neighborCell = nx;
+            if (Dim >= 2)
+              neighborCell += ny * gridDim[0];
+            if (Dim >= 3)
+              neighborCell += nz * gridDim[0] * gridDim[1];
+
+            // Iterate particles in neighbor cell
+            int j = cellHead[neighborCell];
+            while (j != -1) {
+              // Newton's 3rd Law: only if j > i
+              // This prevents double counting and self-interaction
+              if (j > i) {
+                Vector<Dim> dr = r_i - positions[j];
+
+                // Minimum Image Convention
+                for (size_t k = 0; k < Dim; ++k) {
+                  dr[k] -= std::round(dr[k] / boxSize) * boxSize;
+                }
+
+                double r2 = dr.norm2();
+                if (r2 < cutOff * cutOff) {
+                  double r = std::sqrt(r2);
+                  double fMag = potential->calculateForceMagnitude(r);
+                  Vector<Dim> fVec = fMag * (1.0 / r) * dr;
+
+                  // Atomic Updates
+                  for (size_t k = 0; k < Dim; ++k) {
 #pragma omp atomic
-            forces[i][k] += fVec[k];
-
+                    forces[i][k] += fVec[k];
 #pragma omp atomic
-            forces[j][k] -= fVec[k];
-          }
+                    forces[j][k] -= fVec[k];
+                  }
 
 #pragma omp critical
-          {
-            rdf->sample(r);
+                  rdf->sample(r);
+                }
+              }
+              j = cellList[j]; // Next particle in cell
+            }
           }
         }
       }
