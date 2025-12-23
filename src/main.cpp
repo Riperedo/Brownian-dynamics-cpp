@@ -77,6 +77,7 @@ int main(int argc, char *argv[]) {
   int dim = 3;
   std::string potentialType = "HARD_SPHERE";
   std::string outputDir = "scripts";
+  std::string initFile = "";
   double lambda = 1.5;
   double qVal = 7.14; // Default Wave Vector magnitude
   double dt = 0.001;  // Default Time Step
@@ -119,6 +120,8 @@ int main(int argc, char *argv[]) {
       equilSteps = std::stoll(arg.substr(6));
     else if (arg.find("SAVE_FREQ=") == 0)
       saveFreq = std::stoi(arg.substr(10));
+    else if (arg.find("INIT_FILE=") == 0)
+      initFile = arg.substr(10);
   }
 
   // Auto-generate suffix
@@ -138,6 +141,8 @@ int main(int argc, char *argv[]) {
   std::cout << "  Wave Vector (q): " << qVal << std::endl;
   std::cout << "  Output Directory: " << outputDir << std::endl;
   std::cout << "  OpenMP Threads: " << omp_get_max_threads() << std::endl;
+  if (!initFile.empty())
+    std::cout << "  Init File: " << initFile << std::endl;
 
   // Factory
   std::shared_ptr<InteractionPotential> pot;
@@ -157,11 +162,11 @@ int main(int argc, char *argv[]) {
 
   if (dim == 2) {
     Simulation<2> sim(nPart, phi, temp, cutoff, dt, steps, pot, suffix,
-                      outputDir, qs, equilSteps, saveFreq);
+                      outputDir, qs, equilSteps, saveFreq, initFile);
     sim.run();
   } else if (dim == 3) {
     Simulation<3> sim(nPart, phi, temp, cutoff, dt, steps, pot, suffix,
-                      outputDir, qs, equilSteps, saveFreq);
+                      outputDir, qs, equilSteps, saveFreq, initFile);
     sim.run();
   } else {
     std::cerr << "Error: Only 2D or 3D supported." << std::endl;

@@ -1,10 +1,12 @@
 #ifndef SIMULATION_HPP
 #define SIMULATION_HPP
 
+#include <fstream>
 #include <gsl/gsl_randist.h>
 #include <gsl/gsl_rng.h>
 #include <memory>
 #include <omp.h>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -70,7 +72,7 @@ public:
              long long steps, std::shared_ptr<InteractionPotential> pot,
              std::string suffix = "", std::string outDir = "scripts",
              std::vector<double> qs = {7.14}, long long eqSteps = 0,
-             int saveFreq = 1000)
+             int saveFreq = 1000, std::string initFile = "")
       : numParticles(nPart), density(0), temperature(temp), cutOff(rc),
         dt(timeStep), boxSize(0), potential(pot), step(0), totalSteps(steps),
         equilSteps(eqSteps), saveInterval(saveFreq), outputDir(outDir),
@@ -79,55 +81,37 @@ public:
     // Initialize RNG
     gsl_rng_env_setup();
     rng = gsl_rng_alloc(gsl_rng_mt19937);
-    gsl_rng_set(rng, time(NULL)); // Seed with time or fixed
+    gsl_rng_set(rng, time(NULL));
 
-    // Calculate Box Size
-    // 2D: phi = rho * pi * sigma^2 / 4  => rho = 4 * phi / (pi * sigma^2)
-    // Box L = sqrt(N / rho)
-    // Assuming Sigma = 1.0
-    double PI = 3.14159265358979323846;
-    double rho;
-    if (Dim == 2) {
-      rho = phi * 4.0 / PI; // From original code: RHOSTAR=PHI*4.0/PI
-      boxSize = std::sqrt(numParticles / rho);
+    // Handle Initialization
+    if (!initFile.empty()) {
+      loadInitialConfiguration(initFile);
     } else {
-      // 3D: phi = rho * pi * sigma^3 / 6
-      rho = phi * 6.0 / PI;
-      boxSize = std::cbrt(numParticles / rho);
+      // Standard Lattice Init
+      positions.resize(numParticles);
+      realPositions.resize(numParticles);
+      forces.resize(numParticles);
+      initializeLattice();
     }
 
-    // Init arrays
-    positions.resize(numParticles);
-    realPositions.resize(numParticles);
-    forces.resize(numParticles);
+    // Calculate Box Size based on actual numParticles (which might have changed
+    // if loaded from file)
+    calculateBoxSize(phi);
 
-    // Initialize Lattice Grid
-    int side = std::ceil(std::pow(numParticles, 1.0 / Dim));
-    double del = boxSize / side;
-    double offset = -boxSize / 2.0 + del / 2.0; // Center
-
-    // Simple Grid Init (Recursive or nested loops? Nested is hard for template
-    // Dim) We'll just place them on a line/plane/cube roughly Better: simple 1D
-    // loop mapping index to coordinates
+    // Apply PBC to ensure loaded positions are in range
     for (int i = 0; i < numParticles; ++i) {
-      // Primitive mapping, robust enough for fluid equilibration
-      int iz = (Dim == 3) ? (i / (side * side)) : 0;
-      int rem = (Dim == 3) ? (i % (side * side)) : i;
-      int iy = rem / side;
-      int ix = rem % side;
-
-      if (Dim >= 1) {
-        positions[i][0] = offset + ix * del;
+      for (size_t k = 0; k < Dim; ++k) {
+        // Primitive wrapping to [-L/2, L/2]
+        while (positions[i][k] > boxSize / 2.0)
+          positions[i][k] -= boxSize;
+        while (positions[i][k] < -boxSize / 2.0)
+          positions[i][k] += boxSize;
       }
-      if (Dim >= 2) {
-        positions[i][1] = offset + iy * del;
-      }
-      if (Dim >= 3) {
-        positions[i][2] = offset + iz * del;
-      }
-
-      realPositions[i] = positions[i];
+      realPositions[i] = positions[i]; // Reset real positions to wrapped start
     }
+
+    // Forces resize (just in case)
+    forces.resize(numParticles);
 
     // Setup Observables
     msd = std::make_unique<MeanSquareDisplacement<Dim>>(numParticles);
@@ -285,6 +269,86 @@ public:
               (outputSuffix.empty() ? "" : "_" + outputSuffix) + ".dat");
 
     std::cout << "Simulation Complete. Results saved." << std::endl;
+  }
+  void calculateBoxSize(double phi) {
+    double PI = 3.14159265358979323846;
+    double rho;
+    if (Dim == 2) {
+      rho = phi * 4.0 / PI;
+      boxSize = std::sqrt(numParticles / rho);
+    } else {
+      // 3D
+      rho = phi * 6.0 / PI;
+      boxSize = std::cbrt(numParticles / rho);
+    }
+  }
+
+  void initializeLattice() {
+    int side = std::ceil(std::pow(numParticles, 1.0 / Dim));
+    double del = boxSize / side; // Use the class member boxSize
+    double offset = -boxSize / 2.0 + del / 2.0;
+
+    for (int i = 0; i < numParticles; ++i) {
+      int iz = (Dim == 3) ? (i / (side * side)) : 0;
+      int rem = (Dim == 3) ? (i % (side * side)) : i;
+      int iy = rem / side;
+      int ix = rem % side;
+
+      if (Dim >= 1)
+        positions[i][0] = offset + ix * del;
+      if (Dim >= 2)
+        positions[i][1] = offset + iy * del;
+      if (Dim >= 3)
+        positions[i][2] = offset + iz * del;
+
+      realPositions[i] = positions[i];
+    }
+  }
+
+  void loadInitialConfiguration(const std::string &filename) {
+    std::ifstream infile(filename);
+    if (!infile.is_open()) {
+      std::cerr << "Error: Could not open init file " << filename
+                << ". Exiting." << std::endl;
+      exit(1);
+    }
+
+    positions.clear();
+    realPositions.clear();
+
+    std::string line;
+    while (std::getline(infile, line)) {
+      if (line.empty())
+        continue;
+      std::stringstream ss(line);
+      int type, label;
+      double x, y, z;
+
+      // Format: Type X Y Z Label
+      if (!(ss >> type >> x >> y >> z >> label)) {
+        continue;
+      }
+
+      Vector<Dim> p;
+      if (Dim >= 1)
+        p[0] = x;
+      if (Dim >= 2)
+        p[1] = y;
+      if (Dim >= 3)
+        p[2] = z;
+
+      positions.push_back(p);
+      realPositions.push_back(p);
+    }
+
+    numParticles = positions.size();
+    std::cout << "Loaded " << numParticles << " particles from " << filename
+              << std::endl;
+
+    if (numParticles == 0) {
+      std::cerr << "Error: No particles loaded from " << filename << std::endl;
+      exit(1);
+    }
   }
 };
 
